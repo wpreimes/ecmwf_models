@@ -35,6 +35,7 @@ import argparse
 import numpy as np
 from netCDF4 import Dataset
 from collections import OrderedDict
+import os
 
 try:
     from cdo import Cdo
@@ -50,7 +51,6 @@ except ImportError:
 
 
 class CdoNotFoundError(ModuleNotFoundError):
-
     def __init__(self, msg=None):
         _default_msg = "cdo and/or python-cdo not installed. " \
                        "Use conda to install it them under Linux."
@@ -78,6 +78,152 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError("Boolean value expected.")
 
+def save_nc_from_grb(
+    input_grib,
+    output_path,
+    product_name,
+    filename_templ="{product}_AN_%Y%m%d_%H%M.nc",
+    expver_template="{product}_EXPVER_AN_%Y%m%d_%H%M.nc",
+    omit_expver_data=False,
+    grid=None,
+    keep_original=True,
+    remap_method="bil",
+):
+    """
+    Split the downloaded grib file into single images and build folder
+    structure necessary for reshuffling.
+
+    Parameters
+    ----------
+    input_grib : str
+        Filepath of the downloaded .grb file
+    output_path : str
+        Where to save the resulting netcdf images
+    product_name : str
+        Name of the ECMWF model (only for filename generation).
+        ERA5 or ERA5_Land.
+    filename_templ : str, optional (default: "{product}_AN_%Y%m%d_%H%M.nc")
+        Template for naming each separated nc file
+    expver_template: str, optional (default: "{product}_AN_EXPVER{expver}_%Y%m%d_%H%M.nc")
+        If `omit_expver_data` is False and an experiment version is found for
+        a day, then the images will use this template, instead of the normal
+        `filename_template`. This allows differentiating between experimental
+        and final ERA5 data.
+    omit_expver_data: bool, optional (default: False)
+        Days where experimental data (ERA5T) is present will be ignored,
+        and no images will be extracted.
+        This means that for <3 months before present, data will be downloaded
+        but probably not stored.
+    keep_original: bool
+        keep the original downloaded grib data.
+    """
+    localsubdirs = ["%Y", "%j"]
+
+    ds = xr.open_dataset(input_grib, engine='cfgrib',
+                         backend_kwargs={'read_keys': ['expver']}
+                         )
+    # import cf2cdm
+    # cf2cdm.translate_coords(ds, cf2cdm.CDS)
+
+    if grid is not None:
+        if not cdo_available:
+            raise CdoNotFoundError()
+
+        cdo = Cdo()
+        gridpath = os.path.join(output_path, "grid.txt")
+        weightspath = os.path.join(output_path, "remap_weights.nc")
+        if not os.path.exists(gridpath):
+            with open(gridpath, "w") as f:
+                for k, v in grid.items():
+                    f.write(f"{k} = {v}\n")
+
+    for time in ds.time.values:
+        subset = ds.sel(time=time)
+        if 'expver' in subset.dims:
+            if omit_expver_data:
+                warnings.warn(
+                    f'Data for {time} contains experimental versions of '
+                    f'variables. `omit_expver_data` is set to True, '
+                    f'therefore continue with next date.'
+                )
+                continue
+            warnings.warn(
+                f'Data for {time} contains experimental versions of '
+                f'variables. Will use a different file name template.')
+
+            filename_templ = expver_template.format(product=product_name)
+            subset_merge = subset.sel(expver=subset['expver'].values[0])
+            for e in subset['expver'].values[1:]:
+                subset_merge = subset_merge.combine_first(subset.sel(expver=e))
+            subset = subset_merge
+        else:
+            filename_templ = filename_templ.format(product=product_name)
+
+        timestamp = pd.Timestamp(time).to_pydatetime()
+        filepath = create_dt_fpath(
+            timestamp,
+            root=output_path,
+            fname=filename_templ,
+            subdirs=localsubdirs,
+        )
+        if not os.path.exists(os.path.dirname(filepath)):
+            os.makedirs(os.path.dirname(filepath))
+
+        if grid is not None:
+            if not os.path.exists(weightspath):
+                # create weights file
+                getattr(cdo, "gen" + remap_method)(
+                    gridpath, input=subset, output=weightspath)
+            subset = cdo.remap(
+                ",".join([gridpath, weightspath]),
+                input=subset,
+                returnXDataset=True,
+            )
+
+        # same compression for all variables
+        var_encode = {"zlib": True, "complevel": 6}
+        subset.to_netcdf(
+            filepath, encoding={var: var_encode for var in subset.variables})
+
+    nc_in.close()
+
+    if not keep_original:
+        os.remove(input_nc)
+    if grid is not None:
+        cdo.cleanTempDir()
+
+
+
+
+
+
+
+
+    grib_in = pygrib.open(input_grib)
+
+    grib_in.seek(0)
+    for grb in grib_in:
+        template = filename_templ
+        filedate = datetime(grb["year"], grb["month"], grb["day"], grb["hour"])
+        expver = int(grb['expver'])
+
+
+        xr.Dataset()
+        template = template.format(product=product_name)
+
+        filepath = create_dt_fpath(
+            filedate, root=output_path, fname=template, subdirs=localsubdirs)
+
+        if not os.path.exists(os.path.dirname(filepath)):
+            os.makedirs(os.path.dirname(filepath))
+
+        grb_out = open(filepath, "ab")
+
+        grb_out.write(grb.tostring())
+        grb_out.close()
+    grib_in.close()
+    if not keep_original:
+        os.remove(input_grib)
 
 def save_ncs_from_nc(
     input_nc,
@@ -474,3 +620,7 @@ def make_era5_land_definition_file(
 
     ds_in.close()
     ds_out.close()
+
+if __name__ == '__main__':
+    save_nc_from_grb("/home/wpreimes/shares/home/code/ecmwf_models/tests/ecmwf_models-test-data/download/era5_example_downloaded_raw.grb",
+                     '/tmp', 'ERA5')
