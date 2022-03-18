@@ -181,7 +181,7 @@ def save_nc_from_grib(
 
         else:
             filename_templ = filename_templ.format(product=product_name)
-        
+
         valid_vars = list(subset.dims.keys()) + \
                      list(subset.data_vars.keys()) + \
                      [ds.time.name]
