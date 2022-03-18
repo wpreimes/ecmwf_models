@@ -2,8 +2,21 @@
 Changelog
 =========
 
-Unreleased
-==========
+Version 1.0
+===========
+TODO:
+- Remove support for ERA Interim
+- Allow parallel download requests (up to 3)
+- Allow downloading and reading regridded data and spatial subsets
+- Always download image stacks in grib format
+- Parallel image slices to netcdf or grib images
+- Reading xarray data stacks for image stacks (small ones)
+- A time series reader that can combine TS from TS format and image stacks
+- LandMask should be created dynamically
+
+
+Version 0.9
+===========
 
 - ERA5T images are now stored under a different file name
 - Code formatting with yapf

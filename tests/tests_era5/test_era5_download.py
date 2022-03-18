@@ -24,7 +24,7 @@
 Tests for transferring downloaded data to netcdf or grib files
 '''
 
-from ecmwf_models.era5.download import download_and_move, save_ncs_from_nc
+from ecmwf_models.era5.download import download_and_move
 from ecmwf_models.utils import CdoNotFoundError, cdo_available
 
 import os
@@ -45,17 +45,17 @@ grid = {
     "yinc": -0.5
 }
 
-
-@pytest.mark.skipif(cdo_available, reason="CDO is installed")
-def test_download_with_cdo_not_installed():
-    with pytest.raises(CdoNotFoundError):
-        with tempfile.TemporaryDirectory() as out_path:
-            infile = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), '..',
-                "ecmwf_models-test-data", "download",
-                "era5_example_downloaded_raw.nc")
-            save_ncs_from_nc(
-                infile, out_path, 'ERA5', grid=grid, keep_original=True)
+#
+# @pytest.mark.skipif(cdo_available, reason="CDO is installed")
+# def test_download_with_cdo_not_installed():
+#     with pytest.raises(CdoNotFoundError):
+#         with tempfile.TemporaryDirectory() as out_path:
+#             infile = os.path.join(
+#                 os.path.dirname(os.path.abspath(__file__)), '..',
+#                 "ecmwf_models-test-data", "download",
+#                 "era5_example_downloaded_raw.nc")
+#             save_ncs_from_nc(
+#                 infile, out_path, 'ERA5', grid=grid, keep_original=True)
 
 
 def test_dry_download_nc_era5():
@@ -67,10 +67,10 @@ def test_dry_download_nc_era5():
         thefile = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), '..',
             "ecmwf_models-test-data", "download",
-            "era5_example_downloaded_raw.nc")
+            "era5_example_downloaded_raw.grb")
         shutil.copyfile(
             thefile,
-            os.path.join(dl_path, 'temp_downloaded', '20100101_20100101.nc'))
+            os.path.join(dl_path, 'temp_downloaded', '20100101_20100101.grb'))
 
         startdate = enddate = datetime(2010, 1, 1)
 
@@ -80,9 +80,10 @@ def test_dry_download_nc_era5():
             enddate,
             variables=['swvl1', 'swvl2', 'lsm'],
             keep_original=False,
-            h_steps=[0, 12],
             grb=False,
-            dry_run=True)
+            h_steps=[0, 12],
+            dry_run=True
+        )
 
         assert (os.listdir(dl_path) == ['2010'])
         assert (os.listdir(os.path.join(dl_path, '2010')) == ['001'])
@@ -163,7 +164,7 @@ def test_download_nc_era5_regridding():
             h_steps=[0, 12],
             grb=False,
             dry_run=True,
-            grid=grid)
+            remap_grid=grid)
 
         assert (os.listdir(dl_path) == ['2010'])
         assert (os.listdir(os.path.join(dl_path, '2010')) == ['001'])

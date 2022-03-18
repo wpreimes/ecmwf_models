@@ -10,6 +10,12 @@ from typing import Optional, Collection
 from typing_extensions import Literal
 from pygeogrids.grids import CellGrid
 
+"""
+TODO
+[] Make sure that reading the regridded data works as well
+[] Make sure that reading image subsets works as well
+
+"""
 # ERA5 products supported by the reader.
 _supported_products = ['era5', 'era5-land']
 

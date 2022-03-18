@@ -4,11 +4,18 @@
 Module to download ERA5 from terminal in netcdf and grib format.
 """
 
+"""
+    n_proc: int, optional (default: 1)
+        Number of parallel requests to launch (1 month of data = 1 request).
+        to CDS. At the moment CDS will only process up to 3 requests per user
+        at a time.
+"""
+
 from ecmwf_models.utils import (
     load_var_table,
     lookup,
     save_gribs_from_grib,
-    save_ncs_from_nc,
+    save_nc_from_grib,
     mkdate,
     str2bool,
 )
@@ -48,11 +55,12 @@ def download_era5(
     h_steps,
     variables,
     target,
-    grb=False,
     product="era5",
     dry_run=False,
-    cds_kwds={},
-):
+    grid_size=None,
+    bbox=None,
+    cds_kwds=None,
+) -> (dict, dict):
     """
     Download era5 reanalysis data for single levels of a defined time span
 
@@ -74,68 +82,70 @@ def download_era5(
         default variables will be downloaded.
     target : str
         File name, where the data is stored.
-    geb : bool, optional (default: False)
-        Download data in grib format
     product : str
         ERA5 data product to download, either era5 or era5-land
     dry_run: bool, optional (default: False)
         Do not download anything, this is just used for testing the
         functionality
-    cds_kwds: dict, optional
+    grid_size: float, optional (default: None)
+        Grid size of the data to download. If None is passed, the default
+        resolution is used.
+    bbox: Tuple[float, float, float, float], optional (default: None)
+        min_lat, min_lon, max_lat, max_lon
+        Bounding fox for which data is downloaded.
+    cds_kwds: dict, optional (default: None)
         Additional arguments to be passed to the CDS API retrieve request.
 
     Returns
     ---------
-    success : bool
-        Return True after downloading finished
+    result : dict
+        Api Request status
+    request: dict
+        Request passed to CDS API
     """
-
-    if dry_run:
-        return
+    if cds_kwds is None:
+        cds_kwds = dict()
 
     request = {
-        "format": "grib" if grb else "netcdf",
+        "format": "grib",
         "variable": variables,
         "year": [str(y) for y in years],
         "month": [str(m).zfill(2) for m in months],
         "day": [str(d).zfill(2) for d in days],
         "time": [time(h, 0).strftime("%H:%M") for h in h_steps],
     }
+    if bbox is not None:
+        if (bbox[0] > bbox[2]) or (bbox[1] > bbox[3]):
+            raise ValueError(f"Invalid bounding box passed: {bbox} "
+                             f"Expected order: "
+                             f"min_lat, min_lon, max_lat, max_lon")
+        request["bbox"] = bbox
+    if grid_size is not None:
+        request["grid"] = [grid_size, grid_size]
+
     request.update(cds_kwds)
+    result = {'success': False}
     if product == "era5":
         request["product_type"] = "reanalysis"
-        c.retrieve("reanalysis-era5-single-levels", request, target)
+        if not dry_run:
+            api_result = c.retrieve("reanalysis-era5-single-levels", request,
+                                    target)
+            result['success'] = True
     elif product == "era5-land":
-        c.retrieve("reanalysis-era5-land", request, target)
+        if not dry_run:
+            api_result = c.retrieve("reanalysis-era5-land", request, target)
+            result['success'] = True
     else:
         raise ValueError(
             product, "Unknown product, choose either 'era5' or 'era5-land'")
 
-    return True
+    if dry_run:
+        result['success'] = True
+
+    return result, request
 
 
-class CDSStatusTracker:
-    """
-    Track the status of the CDS download by using the CDS callback functions
-    """
 
-    statuscode_ok = 0
-    statuscode_error = -1
-    statuscode_unavailable = 10
-
-    def __init__(self):
-        self.download_statuscode = self.statuscode_ok
-
-    def handle_error_function(self, *args, **kwargs):
-        message_prefix = args[0]
-        message_body = args[1]
-        if self.download_statuscode != self.statuscode_unavailable:
-            if (message_prefix.startswith("Reason:") and
-                    message_body == "Request returned no data"):
-                self.download_statuscode = self.statuscode_unavailable
-            else:
-                self.download_statuscode = self.statuscode_error
-        logging.error(*args, **kwargs)
 
 
 def download_and_move(
@@ -145,14 +155,16 @@ def download_and_move(
     product="era5",
     variables=None,
     keep_original=False,
-    h_steps=[0, 6, 12, 18],
+    h_steps=(0, 6, 12, 18),
     grb=False,
     dry_run=False,
-    grid=None,
+    remap_grid=None,
     remap_method="bil",
-    cds_kwds={},
-    stepsize="month",
-) -> int:
+    download_grid=None,
+    download_bbox=None,
+    cds_kwds=dict(),
+    n_proc=1,
+) -> (int, dict):
     """
     Downloads the data from the ECMWF servers and moves them to the target
     path.
@@ -166,9 +178,9 @@ def download_and_move(
     target_path : str
         Path where the files are stored to
     startdate: datetime
-        first date to download
+        First date to download
     enddate: datetime
-        last date to download
+        Last date to download
     product : str, optional (default: ERA5)
         Either ERA5 or ERA5Land
     variables : list, optional (default: None)
@@ -181,7 +193,7 @@ def download_and_move(
         Download data as grib files
     dry_run: bool
         Do not download anything, this is just used for testing the functions
-    grid : dict, optional
+    remap_grid : dict, optional
         A grid on which to remap the data using CDO. This must be a dictionary
         using CDO's grid description format, e.g.::
 
@@ -205,10 +217,14 @@ def download_and_move(
         - "con": 1st order conservative remapping
         - "con2": 2nd order conservative remapping
         - "laf": largest area fraction remapping
+    download_grid: float, optional (default: None)
+        Grid size of the data to download. If None is passed, the default
+        resolution is used.
+    download_bbox: Tuple[float, float, float, float], optional (default: None)
+        min_lat, min_lon, max_lat, max_lon
+        Bounding box in which data is downloaded.
     cds_kwds: dict, optional
         Additional arguments to be passed to the CDS API retrieve request.
-    stepsize : str, optional
-        Size of steps for requests, can be "month" or "day".
 
     Returns
     -------
@@ -237,29 +253,23 @@ def download_and_move(
         c = cdsapi.Client(
             error_callback=cds_status_tracker.handle_error_function)
 
-    pool = multiprocessing.Pool(1)
+    pool = multiprocessing.Pool(n_proc)
     while curr_start <= enddate:
         status_code = -1
         sy, sm, sd = curr_start.year, curr_start.month, curr_start.day
         y, m = sy, sm
-        if stepsize == "month":
-            sm_days = calendar.monthrange(sy,
-                                          sm)[1]  # days in the current month
-            if (enddate.year == y) and (enddate.month == m):
-                d = enddate.day
-            else:
-                d = sm_days
-        elif stepsize == "day":
-            d = sd
+        sm_days = calendar.monthrange(sy, sm)[1]
+        if (enddate.year == y) and (enddate.month == m):
+            d = enddate.day
         else:
-            raise ValueError(f"Invalid stepsize: {stepsize}")
+            d = sm_days
 
         curr_end = datetime(y, m, d)
 
         fname = "{start}_{end}.{ext}".format(
             start=curr_start.strftime("%Y%m%d"),
             end=curr_end.strftime("%Y%m%d"),
-            ext="grb" if grb else "nc",
+            ext="grb",
         )
 
         downloaded_data_path = os.path.join(target_path, "temp_downloaded")
@@ -267,29 +277,33 @@ def download_and_move(
             os.mkdir(downloaded_data_path)
         dl_file = os.path.join(downloaded_data_path, fname)
 
-        finished, i = False, 0
+        request, finished, i = dict(), False, 0
 
         while (not finished) and (i < 5):  # try max 5 times
             try:
-                finished = download_era5(
+                result, request = download_era5(
                     c,
                     years=[sy],
                     months=[sm],
                     days=range(sd, d + 1),
                     h_steps=h_steps,
                     variables=variables,
-                    grb=grb,
                     product=product,
                     target=dl_file,
                     dry_run=dry_run,
+                    grid_size=download_grid,
+                    bbox=download_bbox,
                     cds_kwds=cds_kwds,
                 )
+                if result['success'] is not True:
+                    raise ValueError("Download was not successful.")
+
                 status_code = 0
                 break
 
             except Exception:  # noqa: E722
                 # If no data is available we don't need to retry
-                if (cds_status_tracker.download_statuscode ==
+                if not dry_run and (cds_status_tracker.download_statuscode ==
                         CDSStatusTracker.statuscode_unavailable):
                     status_code = -10
                     break
@@ -313,27 +327,29 @@ def download_and_move(
                 )
             else:
                 pool.apply_async(
-                    save_ncs_from_nc,
+                    save_nc_from_grib,
                     args=(
                         dl_file,
                         target_path,
                     ),
                     kwds=dict(
                         product_name=product.upper(),
-                        grid=grid,
+                        remap_grid=remap_grid,
                         remap_method=remap_method,
                         keep_original=keep_original,
                     ),
                 )
 
         curr_start = curr_end + timedelta(days=1)
+
     pool.close()
     pool.join()
 
     # remove temporary files
     if not keep_original:
         shutil.rmtree(downloaded_data_path)
-    if grid is not None:
+
+    if remap_grid is not None:
         gridpath = os.path.join(target_path, "grid.txt")
         if os.path.exists(gridpath):
             os.unlink(gridpath)
@@ -412,7 +428,6 @@ def parse_args(args):
               "ERA5-Land+data+documentation"),
     )
     parser.add_argument(
-        "-keep",
         "--keep_original",
         type=str2bool,
         default="False",
@@ -421,7 +436,6 @@ def parse_args(args):
               "Default is False."),
     )
     parser.add_argument(
-        "-grb",
         "--as_grib",
         type=str2bool,
         default="False",
@@ -438,22 +452,42 @@ def parse_args(args):
               "By default 6H images (starting at 0:00 UTC, i.e. 0 6 12 18) "
               "will be downloaded"),
     )
+    parser.add_argument(
+        "--bbox",
+        type=float,
+        default=None,
+        nargs="+",
+        help=("min_lat, min_lon, max_lat, max_lon. "
+              "4 corner coorindates that span the bounding box around the "
+              "spatial subset to download. If not"
+              "specified, the global data is downloaded."),
+    )
+    parser.add_argument(
+        "--grid_size",
+        type=float,
+        default=None,
+        help=("Spatial resolution (in degrees) of the data to download. "
+              "If not specified, data is downloaded in the default resolution "
+              "(0.25 DEG for ERA5 and 0.1 DEG for ERA5-Land)"),
+    )
 
     args = parser.parse_args(args)
 
-    print("Downloading {p} {f} files between {s} and {e} into folder {root}"
-          .format(
-              p=args.product,
-              f="grib" if args.as_grib is True else "netcdf",
-              s=args.start.isoformat(),
-              e=args.end.isoformat(),
-              root=args.localroot,
-          ))
+    print(f"Downloading \n "
+          f"Product: {args.product} "
+          f"Format: {'grib' if args.as_grib is True else 'netcdf'} "
+          f"with {'original' if args.grid_size is None else args.grid_size} "
+          f"DEG spatial resolution between "
+          f"{args.start.isoformat()} and {args.end.isoformat()} "
+          f"into folder {args.localroot}"
+          )
     return args
 
 
 def main(args):
     args = parse_args(args)
+
+
     status_code = download_and_move(
         target_path=args.localroot,
         startdate=args.start,
@@ -461,8 +495,9 @@ def main(args):
         product=args.product,
         variables=args.variables,
         h_steps=args.h_steps,
-        grb=args.as_grib,
         keep_original=args.keep_original,
+        grid_size=args.grid_size,
+        bbox=args.bbox,
     )
     return status_code
 
